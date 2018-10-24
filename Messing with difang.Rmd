@@ -1,0 +1,1032 @@
+---
+title: "Working with Difang Xinxi"
+output: html_document
+---
+
+```{r}
+library(ggplot2)
+library(readr)
+library(haven)
+library(reshape2)
+library(tidyr)
+library(RCurl)
+library(stats)
+library(randomizr)
+library(stargazer)
+library(sandwich)
+library(lmtest)
+library(Matching)
+library(plm)
+library(arm)
+library(ebal)
+library(causalweight)
+library(ri)
+library(LARF)
+library(dplyr)
+library(pscl)
+library(boot)
+
+```
+
+```{r}
+#reading in the data
+allcities<-read_csv("/Users/mbyerly/Documents/UChicago/Research/Data/Demolitions/All Provinces by City.csv")
+
+#remove false population and area values
+allcities[,3:4]<-NULL
+
+ggplot(allcities,aes(x=Hits))+geom_histogram()
+
+
+#read in gdp data
+gdp<-read_csv("/Users/mbyerly/Documents/UChicago/Research/Data/GDP/Major Cities GDP.csv", skip=3)
+colnames(gdp)<-c("Place", "2016", "2015", "2014", "2013", "2012", "2011", "2010", "2009", "2008", "2007", "2006", "2005", "2004", "2003", "2002", "2001", "2000", "1999", "1998", "1997")
+
+#make panel dataset for GDP
+gdp2<-gdp %>%
+  gather(.,key="Year", value="GDP", -Place) 
+
+#year must be integer for left_join  
+gdp2$Year<-as.integer(gdp2$Year)
+
+#read in additional GDP data
+gdp3<-read_csv("/Users/mbyerly/Documents/UChicago/Research/Data/GDP/GDP.csv")
+
+#remove blank columns
+gdp3[,4:5]<-NULL
+
+#remove all of the "市" from city names
+gdp3<-gdp3 %>%
+  mutate(Place=ifelse(grepl("市", Place)==TRUE | grepl("省", Place)==TRUE ,substr(gdp3$Place,1,nchar(gdp3$Place)-1),Place))
+
+#combine GDP data
+#duprows <- rownames(gdp2) %in% rownames(gdp3)
+#allgdp<-rbind(gdp2, gdp3[!duprows,])
+allgdp<-rbind(gdp2,gdp3)
+
+#read in revenue data
+revenue<-read_csv("/Users/mbyerly/Documents/UChicago/Research/Data/3-3 Revenue.csv")
+
+colnames(revenue)<-c("Place","Total","Central","Provincial","Sub","Tax","Utilities","Infrastructure","Landuse","UtilitiesUse","Wastewater","Garbage","OtherRev","Expenditure","Planning","Supervision","UtilitiesMaint","Parks","OtherExp","Place2","Year")
+
+#remove blank columns
+revenue[,22:30]<-NULL
+
+#remove all of the "市" from 2009 city names
+revenue<-revenue %>%
+  mutate(Place=ifelse(Year==2009 & grepl("市", Place)==TRUE ,substr(revenue$Place,1,nchar(revenue$Place)-1),Place))
+
+#test if the code removed all of the "市" from 2009 city names
+test<-revenue%>%
+  filter(Year==2009)
+
+#read in area and population data
+areapop<-read_csv("/Users/mbyerly/Documents/UChicago/Research/Data/2-3 Area and Population.csv")
+
+colnames(areapop)<-c("Place","UrbDistArea","UrbDistPop","UrbDistTempPop","UrbArea","UrbPop","UrbTempPop","BuiltDist","Subtotal","Residential","Admin","Commercial","Industrial","Warehouse","Transport","Utilities","GreenSpace","LandRequisition","Arable","Place2","Year")
+
+#remove all of the "市" from 2009 city names
+areapop<-areapop %>%
+  mutate(Place=ifelse(Year==2009 & grepl("市", Place)==TRUE ,substr(areapop$Place,1,nchar(areapop$Place)-1),Place))
+
+#test if the code removed all of the "市" from 2009 city names
+test2<-areapop%>%
+  filter(Year==2009)
+
+#left_join with GDP and revenue, and area and population
+allcities<-allcities %>%
+  left_join(.,allgdp,by=c("Year"="Year","Place"="Place")) %>%
+  left_join(.,revenue,by=c("Year"="Year","Place"="Place")) %>%
+  left_join(.,areapop,by=c("Year"="Year","Place"="Place"))
+  
+#create lagged terms
+allcities <- allcities[ order( allcities$Place, allcities$Year), ]
+allcities<-allcities %>%
+  mutate(gdplag=lag(GDP,n=1L))
+
+allcities$X7<-NULL
+
+#check lagged terms
+summary(allcities[15,5])
+summary(allcities[16,44])
+
+#create population density variable and GDP change variable
+allcities<-allcities %>%
+  mutate(PopDen=UrbPop/UrbArea) %>%
+  mutate(GDPChange=c(diff(GDP),NA))
+
+#testing GDPChange variable
+allcities$GDP[16]-allcities$GDP[15]
+allcities$GDPChange[15]
+
+#OLS of GDP 
+options(scipen=999)
+basicOLSmodel<-lm(GDPChange~Hits+GDP, data=allcities, na.rm=T)
+basicOLSmodel2<-coeftest(basicOLSmodel,vcov = vcovHC(basicOLSmodel,cluster="group", type = "HC1"))
+basicOLSmodel2
+
+OLSareapop<-lm(GDPChange~Hits+UrbArea+UrbPop+PopDen+GDP, data=allcities, na.rm=T)
+OLSareapop2<-coeftest(OLSareapop,vcov = vcovHC(OLSareapop,cluster="group", type = "HC1"))
+OLSareapop2
+
+#OLS of land use revenue against hits
+RbasicOLSmodel<-lm(Landuse~Hits, data=allcities, na.rm=T)
+RbasicOLSmodel2<-coeftest(RbasicOLSmodel,vcov = vcovHC(RbasicOLSmodel,cluster="group", type = "HC1"))
+RbasicOLSmodel2
+
+ROLSareapop<-lm(Landuse~Hits+UrbArea+UrbPop+PopDen, data=allcities, na.rm=T)
+ROLSareapop2<-coeftest(ROLSareapop,vcov = vcovHC(ROLSareapop,cluster="group", type = "HC1"))
+ROLSareapop2
+
+#plotting relationship between hits and gdplag
+ggplot(allcities,aes(x=Hits,y=GDPChange))+geom_point()+geom_smooth()
+
+#plotting relationship between hits and revenue
+ggplot(allcities,aes(x=Hits,y=Landuse))+geom_point()+geom_smooth()
+
+#summary statistics of allcities
+overview <- within(allcities, {
+  Hits <- factor(Hits)
+  Place <- factor(Place)
+})
+summary(overview)
+
+#facet wrap of all provinces
+allcities<-allcities %>%
+  mutate(EngProvince=ifelse(Province=="浙江","Zhejiang",0)) %>%
+  mutate(EngProvince=ifelse(Province=="北京","Beijing",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="天津","Tianjin",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="河北","Hebei",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="山西","Shanxi",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="内蒙古","Inner Mongolia",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="辽宁","Liaoning",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="吉林","Jilin",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="黑龙江","Heilongjiang",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="上海","Shanghai",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="江苏","Jiangsu",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="安徽","Anhui",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="福建","Fujian",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="江西","Jiangxi",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="山东","Shandong",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="河南","Henan",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="湖北","Hubei",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="湖南","Hunan",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="广东","Guangdong",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="广西","Guangxi",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="海南","Hainan",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="重庆","Chongqing",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="四川","Sichuan",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="贵州","Guizhou",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="云南","Yunnan",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="西藏","Xizang",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="陕西","Shaanxi",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="甘肃","Gansu",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="宁夏","Ningxia",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="新疆","Xinjiang",EngProvince)) %>%
+  mutate(EngProvince=ifelse(Province=="青海","Qinghai",EngProvince)) 
+
+subset1 <- allcities %>%
+  filter(EngProvince %in% c("Heilongjiang","Hainan","Sichuan","Fujian", "Hebei", "Henan","Shanghai","Jiangxi","Guangxi","Jiangsu","Liaoning" ))
+
+subset2<- allcities %>%
+  filter(EngProvince %in% c("Guangdong","Shandong","Zhejiang","Yunnan","Ningxia","Inner Mongolia","Gansu","Jilin","Shanxi","Hunan" ))
+
+subset3<- allcities %>%
+  filter(EngProvince %in% c("Hubei","Xinjiang","Anhui","Guizhou","Shaanxi","Beijing","Tianjin","Xizang","Qinghai","Chongqing" ))
+
+subset1facet <- ggplot(data = subset1, aes(x=factor(Year), y=Hits)) + geom_bar(stat="identity") + facet_wrap(~EngProvince, scales="free_y") + theme_bw()+xlab("Year")+ylab("Demolition Announcements") + theme(axis.text.x = element_text(angle=90))
+
+subset2facet <- ggplot(data = subset2, aes(x=factor(Year), y=Hits)) + geom_bar(stat="identity") + facet_wrap(~EngProvince, scales="free_y") + theme_bw()+xlab("Year")+ylab("Demolition Announcements") + theme(axis.text.x = element_text(angle=90))
+
+subset3facet <- ggplot(data = subset3, aes(x=factor(Year), y=Hits)) + geom_bar(stat="identity") + facet_wrap(~EngProvince, scales="free_y") + theme_bw()+xlab("Year")+ylab("Demolition Announcements") + theme(axis.text.x = element_text(angle=90))
+
+subset1facet
+subset2facet
+subset3facet
+
+```
+
+```{r}
+#GDP and demolitions
+#Subsetting and Matching
+
+#subset the dataset
+cities<-allcities %>%
+  filter(Place!=Province) %>%
+  dplyr::select(Province,Place,Year,Hits,GDP,Landuse,UrbArea,UrbPop,UrbTempPop,GDPChange,EngProvince, PopDen) %>%
+  na.omit() %>%
+  mutate(Treatment=ifelse(Hits>0,1,0))
+
+ggplot(cities,aes(x=Treatment))+geom_histogram(stat="count")
+
+treat<-cities %>%
+  filter(Treatment==1)
+
+length(unique(cities$Place))
+
+control<-cities %>%
+  filter(Treatment==0)
+
+max(cities$Hits)
+
+length(unique(control$Place))
+
+#subset by area
+summary(cities$UrbArea)
+smallcities<-cities %>%
+  filter(UrbArea<=52.00)
+largecities<-cities %>%
+  filter(UrbArea>=275.01)
+midsmallcities<-cities %>%
+  filter(UrbArea>=52.01&UrbArea<=120.00)
+midlargecities<-cities %>%
+  filter(UrbArea>=120.01&UrbArea<=275.00)
+
+#OLS of GDP in year two against hits in year one
+model<-lm(gdplag~Treatment+UrbPop, data=smallcities, na.rm=T)
+coeftest(model,vcov = vcovHC(model,cluster="group", type = "HC1"))
+summary(model)
+
+#plotting relationship between hits and gdplag
+ggplot(largecities,aes(x=Hits,y=gdplag))+geom_point()+geom_smooth()
+
+#Matching
+cov<-cities %>%
+  dplyr::select(PopDen,UrbArea,UrbPop,GDP)%>%
+  as.matrix()
+
+dv<-cities %>%
+  dplyr::select(GDPChange) %>%
+  as.matrix()
+
+iv<-cities %>%
+  dplyr::select(Treatment) %>%
+  as.matrix()
+
+#Get propensity scores for each observation
+citiesmod<-glm(Treatment~PopDen + UrbArea + UrbPop + GDP, data=cities)
+summary(citiesmod)
+
+#Put propensity scores in their own column
+fitted<-as.data.frame(citiesmod$fitted.values)
+colnames(fitted)<-c("Propensity")
+cities<-cbind(cities,fitted)
+
+#Visualize propensity scores and treatment
+cities$Treatment <- factor(cities$Treatment)
+ggplot(cities, aes(x=Propensity, fill=Treatment, color=Treatment)) +
+geom_density(alpha=.5) +
+theme(legend.position='bottom')
+
+#Visualize covariates and treatment
+ggplot(cities, aes(x=PopDen, fill=Treatment, color=Treatment)) +
+geom_density(alpha=.5) +
+theme(legend.position='bottom')
+
+ggplot(cities, aes(x=UrbArea, fill=Treatment, color=Treatment)) +
+geom_density(alpha=.5) +
+theme(legend.position='bottom')
+
+ggplot(cities, aes(x=UrbPop, fill=Treatment, color=Treatment)) +
+geom_density(alpha=.5) +
+theme(legend.position='bottom')
+
+ggplot(cities, aes(x=UrbTempPop, fill=Treatment, color=Treatment)) +
+geom_density(alpha=.5) +
+theme(legend.position='bottom')
+
+ggplot(cities, aes(x=GDP, fill=Treatment, color=Treatment)) +
+geom_density(alpha=.5) +
+theme(legend.position='bottom')
+
+propmatch<-Match(dv,iv,fitted, replace=TRUE)
+summary(propmatch)
+
+```
+
+```{r}
+#GDP and Demolitions
+#Province Fixed Effects
+
+fixedcities<-allcities %>%
+  filter(Place!=Province) %>%
+  dplyr::select(Province,Place,Year,Hits,GDP,Landuse,UrbArea,UrbPop,UrbTempPop,GDPChange,EngProvince, PopDen) %>%
+  na.omit() %>%
+  mutate(Treatment=ifelse(Hits>0,1,0))
+
+fixedplm <- plm.data(fixedcities, indexes = c("Province"))
+
+firstdiff<-plm(gdplag~Hits+PopDen, data=fixedplm,model="fd")
+correctedfirstdiff<-coeftest(firstdiff, vcov = function(x) vcovHC(x, cluster = "group",
+type = "HC1"))
+correctedfirstdiff
+
+#Run a fixed effects model
+fixed<-plm(gdplag~Hits+PopDen, data=fixedplm, model = "within")
+correctedfixed<-coeftest(fixed, vcov = function(x) vcovHC(x, cluster = "group",
+type = "HC1"))
+
+correctedfixed
+
+#Province fixed effects another way
+provincefemod<-lm(GDPChange~Hits+Province+GDP,data=allcities, na.rm=TRUE)
+provincefemod2<-coeftest(provincefemod, vcov = function(x) vcovHC(x, cluster = "group",
+type = "HC1"))
+provincefemod2
+
+provincefemodareapop<-lm(GDPChange~Hits+UrbArea+UrbPop+PopDen+GDP+Province,data=allcities, na.rm=TRUE)
+provincefemodareapop2<-coeftest(provincefemodareapop, vcov = function(x) vcovHC(x, cluster = "group",
+type = "HC1"))
+provincefemodareapop2
+
+#Province fixed effects with a linear time trend. 
+lineartimemod<-lm(GDPChange~Hits+Province+GDP+Year,data=allcities, na.rm=TRUE)
+lineartimemod2<-coeftest(lineartimemod, vcov = function(x) vcovHC(x, cluster = "group",
+type = "HC1"))
+lineartimemod2
+
+stargazer(basicOLSmodel2, OLSareapop2, provincefemod2,provincefemodareapop2, lineartimemod2, style="ajps", out="GDP.html")
+
+```
+
+```{r}
+#Revenue on demolitions
+#Subsetting and Matching
+
+#subset the dataset
+cities2<-allcities %>%
+  filter(Place!=Province) %>%
+  dplyr::select(Province,Place,Year,Hits,GDP,Landuse,UrbArea,UrbPop,UrbTempPop,gdplag,EngProvince, PopDen) %>%
+  na.omit() %>%
+  mutate(Treatment=ifelse(Hits>0,1,0))
+
+#subset by area
+summary(cities2$UrbArea)
+smallcities<-cities2 %>%
+  filter(UrbArea<=52.00)
+largecities<-cities2 %>%
+  filter(UrbArea>=275.01)
+midsmallcities<-cities2 %>%
+  filter(UrbArea>=52.01&UrbArea<=120.00)
+midlargecities<-cities2 %>%
+  filter(UrbArea>=120.01&UrbArea<=275.00)
+
+#OLS of revenue against hits 
+model<-lm(Landuse~Treatment, data=cities2, na.rm=T)
+coeftest(model,vcov = vcovHC(model,cluster="group", type = "HC1"))
+summary(model)
+
+#plotting relationship between hits and gdplag
+ggplot(cities2,aes(x=Hits,y=gdplag))+geom_point()+geom_smooth()
+
+#Matching
+cov2<-cities2 %>%
+  dplyr::select(PopDen,UrbTempPop,UrbArea,UrbPop,GDP)%>%
+  as.matrix()
+
+dv2<-cities2 %>%
+  dplyr::select(Landuse) %>%
+  as.matrix()
+
+iv2<-cities2 %>%
+  dplyr::select(Treatment) %>%
+  as.matrix()
+
+#Get propensity scores for each observation
+cities2mod<-glm(Treatment~PopDen + UrbArea + UrbPop + GDP, data=cities2)
+summary(cities2mod)
+
+#Put propensity scores in their own column
+fitted2<-as.data.frame(cities2mod$fitted.values)
+colnames(fitted2)<-c("Propensity")
+cities2<-cbind(cities2,fitted2)
+
+#Visualize propensity scores and treatment
+cities2$Treatment <- factor(cities2$Treatment)
+ggplot(cities2, aes(x=Propensity, fill=Treatment, color=Treatment)) +
+geom_density(alpha=.5) +
+theme(legend.position='bottom')
+
+#Visualize covariates and treatment
+ggplot(cities2, aes(x=PopDen, fill=Treatment, color=Treatment)) +
+geom_density(alpha=.5) +
+theme(legend.position='bottom')
+
+ggplot(cities2, aes(x=UrbArea, fill=Treatment, color=Treatment)) +
+geom_density(alpha=.5) +
+theme(legend.position='bottom')
+
+ggplot(cities2, aes(x=UrbPop, fill=Treatment, color=Treatment)) +
+geom_density(alpha=.5) +
+theme(legend.position='bottom')
+
+ggplot(cities2, aes(x=UrbTempPop, fill=Treatment, color=Treatment)) +
+geom_density(alpha=.5) +
+theme(legend.position='bottom')
+
+propmatch2<-Match(dv2,iv2,fitted2, replace=TRUE)
+summary(propmatch2)
+
+```
+```{r}
+#Revenue and Demolitions
+#Province Fixed Effects
+
+fixedcities2<-allcities %>%
+  filter(Place!=Province) %>%
+  dplyr::select(Province,Place,Year,Hits,GDP,Landuse,UrbArea,UrbPop,UrbTempPop,gdplag,EngProvince, PopDen) %>%
+  na.omit() %>%
+  mutate(Treatment=ifelse(Hits>0,1,0))
+
+fixedplm2<- plm.data(fixedcities2, indexes = c("Province"))
+
+firstdiff2<-plm(Landuse~Hits+PopDen+UrbTempPop, data=fixedplm2,model="fd")
+correctedfirstdiff<-coeftest(firstdiff2, vcov = function(x) vcovHC(x, cluster = "group",
+type = "HC1"))
+correctedfirstdiff
+
+#Run a fixed effects model
+fixed2<-plm(Landuse~Hits+PopDen+UrbTempPop, data=fixedplm2, model = "within")
+correctedfixed<-coeftest(fixed2, vcov = function(x) vcovHC(x, cluster = "group",
+type = "HC1"))
+
+correctedfixed
+
+#Province fixed effects another way
+Rprovincefemod<-lm(Landuse~Hits+Province,data=allcities, na.rm=TRUE)
+Rprovincefemod2<-coeftest(Rprovincefemod, vcov = function(x) vcovHC(x, cluster = "group",
+type = "HC1"))
+
+Rprovincefemodareapop<-lm(Landuse~Hits+UrbArea+UrbPop+Province + PopDen+ GDP,data=allcities, na.rm=TRUE)
+Rprovincefemodareapop2<-coeftest(Rprovincefemodareapop, vcov = function(x) vcovHC(x, cluster = "group",
+type = "HC1"))
+
+
+#Province fixed effects with a linear time trend. 
+Rlineartimemod<-lm(Landuse~Hits+Province+Year,data=allcities, na.rm=TRUE)
+Rlineartimemod2<-coeftest(Rlineartimemod, vcov = function(x) vcovHC(x, cluster = "group",
+type = "HC1"))
+
+stargazer(RbasicOLSmodel2, ROLSareapop2, Rprovincefemod2,Rprovincefemodareapop2, Rlineartimemod2, style="ajps", out="Revenue.html")
+
+```
+
+```{r}
+#POISSON SECTION IS UNNECESSARY BECAUSE DEPENDENT VARIABLES (GDP OR LAND TRANSFER REVENUE) ARE NOT COUNT VARIABLES 
+#Poisson regressions
+poissonmod<- glm(gdplag ~ Hits, family="poisson", data=allcities)
+summary(poissonmod)
+
+poissonmod2<- glm(Landuse ~ Hits, family="poisson", data=allcities)
+summary(poissonmod2)
+
+#Robust errors for Poisson model of GDP on Hits
+cov.m1 <- vcovHC(poissonmod, type="HC0")
+std.err <- sqrt(diag(cov.m1))
+r.est <- cbind(Estimate= coef(poissonmod), "Robust SE" = std.err,
+"Pr(>|z|)" = 2 * pnorm(abs(coef(poissonmod)/std.err), lower.tail=FALSE),
+LL = coef(poissonmod) - 1.96 * std.err,
+UL = coef(poissonmod) + 1.96 * std.err)
+
+r.est
+
+#Robust errors for Poisson model of Land use revenue on Hits
+cov.m2 <- vcovHC(poissonmod2, type="HC0")
+std.err2 <- sqrt(diag(cov.m2))
+r.est2 <- cbind(Estimate= coef(poissonmod2), "Robust SE" = std.err2,
+"Pr(>|z|)" = 2 * pnorm(abs(coef(poissonmod2)/std.err2), lower.tail=FALSE),
+LL = coef(poissonmod2) - 1.96 * std.err2,
+UL = coef(poissonmod2) + 1.96 * std.err2)
+
+r.est2
+
+#Zero-inflated Poisson regression
+zip <- zeroinfl(gdplag ~ Hits, data = allcities)
+summary(zip)
+
+#comparing Poisson regressions to zero-inflated Poisson regressions
+vuong(poissonmod, zip)
+```
+
+```{r}
+#IGNORE THIS CHUNK: FAILED
+library(RColorBrewer)
+library(lubridate)
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(haven)
+library(tidyverse)
+library(lubridate)
+
+# all city-level announcements
+
+graphingall<-allcities %>%
+  filter(Place!=Province)
+
+summary(graphingall$UrbPop)
+
+ggplot(graphingall,aes(x=UrbPop))+geom_histogram()
+
+graphingall<-graphingall%>%
+  mutate(PopulationQuartile=ifelse(UrbPop>=48.36,
+                                   "Most Populous", 0)) %>%
+  mutate(PopulationQuartile=ifelse(UrbPop>=15.32 & UrbPop<=48.35,
+                         "Mid-range", PopulationQuartile)) %>%
+  mutate(PopulationQuartile=ifelse(UrbPop<=15.31,"Least Populous", 
+                         PopulationQuartile))
+
+allchina <- ggplot(graphingall, aes(x=Year, 
+                                     fill=PopulationQuartile,
+                                     order=PopulationQuartile)) + 
+  geom_histogram() +
+  theme_bw() +
+  scale_fill_brewer(palette="Set1") +
+  ylab("Announcements") +
+  xlab("Year") +
+  ggtitle("Announcements of Demolition Activity for all China") 
+
+ggsave("All China.pdf")
+
+
+```
+
+```{r}
+difang<-read_csv("/Users/mbyerly/Documents/UChicago/Research/Data/Demolitions/Announcements.csv")
+difang$dates<-as.Date(difang$日期, "%m/%d/%Y")
+
+ggplot(difang, aes(x=dates)) +
+  geom_histogram(binwidth = 30) + 
+  theme_bw()+ggtitle("All China")
+
+beijing<-data.frame(difang)%>%
+  filter(省=="北京")%>%
+  select(dates)
+                   
+ggplot(beijing, aes(x=dates)) +
+  geom_histogram(binwidth = 60) + 
+  theme_bw()+ggtitle("Beijing")
+
+shandong<-data.frame(difang)%>%
+  filter(省=="山东")%>%
+  select(dates)
+                   
+ggplot(shandong, aes(x=dates)) +
+  geom_histogram(binwidth = 60) + 
+  theme_bw()+ggtitle("Shandong")
+
+zhejiang<-data.frame(difang)%>%
+  filter(省=="浙江")%>%
+  select(dates)
+                   
+ggplot(zhejiang, aes(x=dates)) +
+  geom_histogram(binwidth = 60) + 
+  theme_bw()+ggtitle("Zhejiang")
+
+eastchina<-data.frame(difang)%>%
+  filter(省 %in% c("上海","江苏","安徽","山东","福建","浙江","江西"))%>%
+  select(dates)
+
+ggplot(eastchina, aes(x=dates)) +
+  geom_histogram(binwidth = 30) + 
+  theme_bw()+ggtitle("East China")
+
+southcentralchina<-data.frame(difang)%>%
+  filter(省 %in% c("海南","河南","广西","湖北","湖南","广东"))%>%
+  select(dates)
+
+ggplot(southcentralchina, aes(x=dates)) +
+  geom_histogram(binwidth = 30) + 
+  theme_bw()+ggtitle("South Central China")
+
+southwestchina<-data.frame(difang)%>%
+  filter(省 %in% c("重庆","四川","云南","贵州","西藏"))%>%
+  select(dates)
+
+ggplot(southwestchina, aes(x=dates)) +
+  geom_histogram(binwidth = 30) + 
+  theme_bw()+ggtitle("Southwest China")
+
+northwestchina<-data.frame(difang)%>%
+  filter(省 %in% c("陕西","甘肃","青海","宁夏","新疆"))%>%
+  select(dates)
+
+ggplot(northwestchina, aes(x=dates)) +
+  geom_histogram(binwidth = 60) + 
+  theme_bw()+ggtitle("Northwest China")
+
+northchina<-data.frame(difang)%>%
+  filter(省 %in% c("北京","天津","河北","山西","内蒙古"))%>%
+  select(dates)
+
+ggplot(northchina, aes(x=dates)) +
+  geom_histogram(binwidth = 30) + 
+  theme_bw()+ggtitle("North China")
+
+
+northeastchina<-data.frame(difang)%>%
+  filter(省 %in% c("辽宁","吉林","黑龙江"))%>%
+  select(dates)
+
+ggplot(northeastchina, aes(x=dates)) +
+  geom_histogram(binwidth = 1) + 
+  theme_bw()+ggtitle("Northeast China")
+```
+
+
+```{r}
+library(maps)
+library(mapdata)
+library(coefplot)
+library(ggmap)
+library(maptools)
+library(stringr)
+library(ggplot2)
+library(readr)
+library(dplyr, warn.conflicts = F)
+library(rgeos)
+library(sp)
+library(rgdal)
+library(jsonlite)
+gpclibPermit()
+map("china")
+library(maptools)
+devtools::install_github("dkahle/ggmap")
+register_google(key = "AIzaSyDjKBOz-CvL9MqpnrE03V9NIT0yzkY165M")
+
+
+latlon<-geocode(na.omit(difang$地方))
+both<- data.frame(difang$地方,latlon)
+colnames(both)[1]<- "地方"
+withlatlon<-left_join(difang, both, by = c("地方"="地方"))
+
+ggplot(withlatlon,aes(x=lon,y=lat))+geom_point()+theme_bw()
+
+china <- c(left = 72, bottom = 15, right = 135, top = 60)
+map_china <- get_stamenmap(china, zoom = 4, maptype = "toner-lite")
+ggmap(map_china) + geom_point(aes(x = lon, y = lat), data = withlatlon,
+ alpha = .5, color="darkred", size = 1) +xlab("Longitude")+ylab("Latitude")+ggtitle("Distribution of Announcements")+theme(plot.title = element_text(hjust=0.5))
+
+
+
+#let's see by year
+#2017
+seventeen<-data.frame(withlatlon)%>%
+  filter(dates > "0016-12-31" & dates < "0018-01-01")%>%
+  select(地方,lat,lon)
+
+ggmap(map_china) +geom_point(aes(x = lon, y = lat), data = seventeen,
+ alpha = .5, color="darkred", size = 1)+xlab("Longitude")+ylab("Latitude")+ggtitle("2017 Announcements")+theme(plot.title = element_text(hjust=0.5))
+
+#2016
+sixteen<-data.frame(withlatlon)%>%
+  filter(dates > "0015-12-31" & dates < "0017-01-01")%>%
+  select(地方,lat,lon)
+
+ggmap(map_china) + geom_point(aes(x = lon, y = lat), data = sixteen,
+ alpha = .5, color="darkred", size = 1) +xlab("Longitude")+ylab("Latitude")+ggtitle("2016 Announcements")+theme(plot.title = element_text(hjust=0.5))
+
+#2015
+fifteen<-data.frame(withlatlon)%>%
+  filter(dates > "0014-12-31" & dates < "0016-01-01")%>%
+  select(地方,lat,lon)
+
+ggmap(map_china) + geom_point(aes(x = lon, y = lat), data = fifteen,
+ alpha = .5, color="darkred", size = 1) +xlab("Longitude")+ylab("Latitude")+ggtitle("2015 Announcements")+theme(plot.title = element_text(hjust=0.5))
+
+#2014
+fourteen<-data.frame(withlatlon)%>%
+  filter(dates > "0013-12-31" & dates < "0015-01-01")%>%
+  select(地方,lat,lon)
+
+ggmap(map_china) + geom_point(aes(x = lon, y = lat), data = fourteen,
+ alpha = .5, color="darkred", size = 1) +xlab("Longitude")+ylab("Latitude")+ggtitle("2014 Announcements")+theme(plot.title = element_text(hjust=0.5))
+
+#2013
+thirteen<-data.frame(withlatlon)%>%
+  filter(dates > "0012-12-31" & dates < "0014-01-01")%>%
+  select(地方,lat,lon)
+
+ggmap(map_china) + geom_point(aes(x = lon, y = lat), data = thirteen,
+ alpha = .5, color="darkred", size = 1) +xlab("Longitude")+ylab("Latitude")+ggtitle("2013 Announcements")+theme(plot.title = element_text(hjust=0.5))
+
+#2012
+twelve<-data.frame(withlatlon)%>%
+  filter(dates > "0011-12-31" & dates < "0013-01-01")%>%
+  select(地方,lat,lon)
+
+ggmap(map_china) + geom_point(aes(x = lon, y = lat), data = twelve,
+ alpha = .5, color="darkred", size = 1) +xlab("Longitude")+ylab("Latitude")+ggtitle("2012 Announcements")+theme(plot.title = element_text(hjust=0.5))
+```
+
+```{r}
+library(ggmap)
+
+china <- c(left = -125, bottom = 25.75, right = -67, top = 49)
+map <- get_stamenmap(china, zoom = 5, maptype = "toner-lite")
+ggmap(map)
+
+ggmap(get_map("china", zoom = 4, source = "stamen",maptype = "watercolor"))+geom_point(aes(x = Longitude, y = Latitude), data = data,
+ alpha = .5, color="darkred", size = 3)
+
+
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(haven)
+library(tidyverse)
+library(lubridate)
+
+announcements<-read_csv("/Users/mbyerly/Documents/UChicago/Research/Data/Announcements.csv")
+
+announcements<-announcements %>%
+  mutate(date=mdy(日期)) %>%
+  mutate(zhejiang=ifelse(省=="浙江", 1, 0))
+
+announcements<-announcements %>%
+  mutate(Province=ifelse(省=="浙江","Zhejiang",0)) %>%
+  mutate(Province=ifelse(省=="北京","Beijing",Province)) %>%
+  mutate(Province=ifelse(省=="天津","Tianjin",Province)) %>%
+  mutate(Province=ifelse(省=="河北","Hebei",Province)) %>%
+  mutate(Province=ifelse(省=="山西","Shanxi",Province)) %>%
+  mutate(Province=ifelse(省=="内蒙古","Inner Mongolia",Province)) %>%
+  mutate(Province=ifelse(省=="辽宁","Liaoning",Province)) %>%
+  mutate(Province=ifelse(省=="吉林","Jilin",Province)) %>%
+  mutate(Province=ifelse(省=="黑龙江","Heilongjiang",Province)) %>%
+  mutate(Province=ifelse(省=="上海","Shanghai",Province)) %>%
+  mutate(Province=ifelse(省=="江苏","Jiangsu",Province)) %>%
+  mutate(Province=ifelse(省=="安徽","Anhui",Province)) %>%
+  mutate(Province=ifelse(省=="福建","Fujian",Province)) %>%
+  mutate(Province=ifelse(省=="江西","Jiangxi",Province)) %>%
+  mutate(Province=ifelse(省=="山东","Shandong",Province)) %>%
+  mutate(Province=ifelse(省=="河南","Henan",Province)) %>%
+  mutate(Province=ifelse(省=="湖北","Hubei",Province)) %>%
+  mutate(Province=ifelse(省=="湖南","Hunan",Province)) %>%
+  mutate(Province=ifelse(省=="广东","Guangdong",Province)) %>%
+  mutate(Province=ifelse(省=="广西","Guangxi",Province)) %>%
+  mutate(Province=ifelse(省=="海南","Hainan",Province)) %>%
+  mutate(Province=ifelse(省=="重庆","Chongqing",Province)) %>%
+  mutate(Province=ifelse(省=="四川","Sichuan",Province)) %>%
+  mutate(Province=ifelse(省=="贵州","Guizhou",Province)) %>%
+  mutate(Province=ifelse(省=="云南","Yunnan",Province)) %>%
+  mutate(Province=ifelse(省=="西藏","Xizang",Province)) %>%
+  mutate(Province=ifelse(省=="陕西","Shaanxi",Province)) %>%
+  mutate(Province=ifelse(省=="甘肃","Gansu",Province)) %>%
+  mutate(Province=ifelse(省=="宁夏","Ningxia",Province)) %>%
+  mutate(Province=ifelse(省=="新疆","Xinjiang",Province)) %>%
+  mutate(Province=ifelse(省=="青海","Qinghai",Province)) 
+
+sample <- announcements %>%
+  filter(Province %in% c("Beijing","Chongqing","Fujian",
+                     "Guangdong","Hebei","Henan","Hubei","Jiangsu",
+                     "Jiangxi","Shaanxi","Shandong","Zhejiang"))
+
+panel<-ggplot(sample, aes(x=date)) +
+  geom_histogram(binwidth = 60) + 
+  facet_wrap(~Province,ncol=4)+
+  geom_vline(aes(xintercept=as.numeric(as.Date("2015-10-1"))),
+                linetype=4, colour="black") + 
+  xlab("Date")+
+  ylab("Count")+
+  theme_bw()
+ggsave("Announcements Facets.pdf", panel)
+
+comparison<-ggplot(announcements, aes(x=date)) +
+  geom_histogram(data=subset(announcements,Province != "Zhejiang"),
+                 alpha=0.5, fill="black") +
+    geom_vline(aes(xintercept=as.numeric(as.Date("2015-10-1"))),
+                linetype=4, colour="black") + 
+  geom_histogram(data=subset(announcements,Province == "Zhejiang"),
+                 fill = "maroon", alpha = 0.5) +
+  xlab("Date")+
+  ylab("Count")+
+  theme_bw()
+ggsave("Announcements Comparison.pdf", comparison)
+
+allchina<-ggplot(announcements, aes(x=date)) +
+  geom_histogram(binwidth=30, alpha=0.5, fill="black") +
+    geom_vline(aes(xintercept=as.numeric(as.Date("2015-10-1"))),
+                linetype=4, colour="black") + 
+  xlab("Date")+
+  ylab("Count")+
+  theme_bw() +
+  scale_fill_brewer(palette="Set1")
+ggsave("Announcements All China.pdf", allchina)
+
+allchina<-ggplot(announcements, aes(x=date)) +
+  geom_histogram(binwidth=30, alpha=0.5, fill="black") +
+  xlab("Date")+
+  ylab("Count")+
+  theme_bw()
+ggsave("Announcements All China.pdf", allchina)
+
+```
+
+```{r}
+# For China Seminar
+library(RColorBrewer)
+library(lubridate)
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(haven)
+library(tidyverse)
+library(lubridate)
+
+#Zhejiang
+zhejiang<-read_csv("/Users/mbyerly/Documents/UChicago/Research/Data/Zhejiang Hits with 2016 Population.csv")
+
+zhejiang <- zhejiang %>%
+  select(Year, Place, Hits, Population) %>%
+  filter(Place!="浙江") %>%
+  mutate(Date=lubridate::years(Year))
+
+summary(zhejiang$Population)
+
+zhejiang <- zhejiang %>%
+  mutate(PopulationQuartile=ifelse(Population>=122.00,
+                                   "Most Populous", 0)) %>%
+  mutate(PopulationQuartile=ifelse(Population>=85.00 & Population<=121.99,
+                         "More Populous", PopulationQuartile)) %>%
+  mutate(PopulationQuartile=ifelse(Population>=67.00 & Population<=84.99,
+                         "Less Populous", PopulationQuartile)) %>%
+  mutate(PopulationQuartile=ifelse(Population<=66.99,"Least Populous", 
+                         PopulationQuartile))
+
+zhejianghits <- ggplot(zhejiang, aes(x=Year, y=Hits, 
+                                     fill=PopulationQuartile,
+                                     order=PopulationQuartile)) + 
+  geom_bar(stat="identity") +
+  theme_bw() +
+  ylim(0,8500)+
+  geom_vline(aes(xintercept=2010.5),
+                linetype=4, colour="black") +
+  geom_vline(aes(xintercept=2012.5),
+                linetype=4, colour="black") +
+  geom_vline(aes(xintercept=2015.5),
+                linetype=4, colour="black") +
+  ggtitle("Hits about Demolitions on Zhejiang Government Websites") +
+  scale_fill_brewer(palette="Set1")
+
+zhejianghits2<-zhejianghits + 
+ geom_text(aes(x=2010.5, label="Ban on Forced Demolitions", y=20), 
+            angle=90, hjust = -0.75, vjust= -.2, 
+            size=7) +
+ geom_text(aes(x=2012.5, label="Start of Campaign", y=20), 
+            angle=90, hjust = -1.6, vjust = -.2,
+            size=7) + 
+ geom_text(aes(x=2015.5, label="End of Campaign", y=20), 
+            angle=90, hjust = -1.72, vjust = -.2,
+            size=7)
+ggsave("Zhejiang Hits.pdf")
+
+# Hainan
+
+hainan<-read_csv("/Users/mbyerly/Documents/UChicago/Research/Data/Hainan Hits.csv")
+
+hainan <- hainan %>%
+  select(Year, Place, Hits, Population) %>%
+  filter(Place!="海南") %>%
+  mutate(Date=lubridate::years(Year))
+
+summary(hainan$Population)
+
+hainan <- hainan %>%
+  mutate(PopulationQuartile=ifelse(Population>=63.00,
+                                   "Most Populous", 0)) %>%
+  mutate(PopulationQuartile=ifelse(Population>=59.00 & Population<=62.99,
+                         "More Populous", PopulationQuartile)) %>%
+  mutate(PopulationQuartile=ifelse(Population>=45.00 & Population<=58.99,
+                         "Less Populous", PopulationQuartile)) %>%
+  mutate(PopulationQuartile=ifelse(Population<=44.99,"Least Populous", 
+                         PopulationQuartile))
+
+hainanhits <- ggplot(hainan, aes(x=Year, y=Hits, 
+                                     fill=PopulationQuartile,
+                                     order=PopulationQuartile)) + 
+  geom_bar(stat="identity") +
+  theme_bw() +
+  geom_vline(aes(xintercept=2010.5),
+                linetype=4, colour="black") +
+  geom_vline(aes(xintercept=2012.5),
+                linetype=4, colour="black") +
+  geom_vline(aes(xintercept=2014.5),
+                linetype=4, colour="black") +
+  ggtitle("Hits about Demolitions on Hainan Government Websites") +
+  scale_fill_brewer(palette="Set1")
+
+hainanhits2<-hainanhits + 
+ geom_text(aes(x=2010.5, label="Ban on Forced Demolitions", y=20), 
+            angle=90, hjust = -0.68, vjust= -.2, 
+            size=7) +
+ geom_text(aes(x=2012.5, label="Haikou and Sanya Experiments", y=20), 
+            angle=90, hjust = -0.45, vjust = -.2,
+            size=7) + 
+ geom_text(aes(x=2014.5, label="Province-wide Campaign", y=20), 
+            angle=90, hjust = -0.8, vjust = -.2,
+            size=7)
+ggsave("Hainan Hits.pdf")
+
+# Shandong
+
+shandong<-read_csv("/Users/mbyerly/Documents/UChicago/Research/Data/Shandong Hits.csv")
+
+shandong <- shandong %>%
+  select(Year, Place, Hits, Population) %>%
+  filter(Place!="山东") %>%
+  mutate(Date=lubridate::years(Year))
+
+summary(shandong$Population)
+
+shandong <- shandong %>%
+  mutate(PopulationQuartile=ifelse(Population>=148.00,
+                                   "Most Populous", 0)) %>%
+  mutate(PopulationQuartile=ifelse(Population>=110.00 & Population<=147.99,
+                         "More Populous", PopulationQuartile)) %>%
+  mutate(PopulationQuartile=ifelse(Population>=74.00 & Population<=109.99,
+                         "Less Populous", PopulationQuartile)) %>%
+  mutate(PopulationQuartile=ifelse(Population<=73.99,"Least Populous", 
+                         PopulationQuartile))
+
+shandonghits <- ggplot(shandong, aes(x=Year, y=Hits, 
+                                     fill=PopulationQuartile,
+                                     order=PopulationQuartile)) + 
+  geom_bar(stat="identity") +
+  theme_bw() +
+  geom_vline(aes(xintercept=2010.5),
+                linetype=4, colour="black") +
+  geom_vline(aes(xintercept=2012.5),
+                linetype=4, colour="black") +
+  geom_vline(aes(xintercept=2016.5),
+                linetype=4, colour="black") +
+  ggtitle("Hits about Demolitions on Shandong Government Websites") +
+  scale_fill_brewer(palette="Set1")
+
+shandonghits2<-shandonghits + 
+ geom_text(aes(x=2010.5, label="Ban on Forced Demolitions", y=20), 
+            angle=90, hjust = -0.75, vjust= -.2, 
+            size=7) +
+ geom_text(aes(x=2012.5, label="Inspection Teams Introduced", y=20), 
+            angle=90, hjust = -0.65, vjust = -.2,
+            size=7) + 
+ geom_text(aes(x=2016.5, label="Province-Wide Campaign", y=20), 
+            angle=90, hjust = -0.825, vjust = -.2,
+            size=7)
+ggsave("Shandong Hits.pdf")
+
+# all china
+announcements<-read_csv("/Users/mbyerly/Documents/UChicago/Research/Data/Announcements.csv")
+
+characteristics<-read_csv("/Users/mbyerly/Documents/UChicago/Research/Data/2016 Characteristics.csv")
+
+characteristics<-characteristics %>%
+  select(Place,Area,Population)
+
+announcements<-announcements %>%
+  mutate(date=mdy(日期))
+
+announcements<-announcements%>%
+  mutate(Region=ifelse(省%in%c("上海","江苏","安徽","山东","福建","浙江",
+                            "江西"),"East", 0)) %>%
+  mutate(Region=ifelse(省%in%c("海南","河南","广西","湖北","湖南","广东"),
+                          "South Central", Region)) %>%
+  mutate(Region=ifelse(省%in%c("重庆","四川","云南","贵州","西藏"),
+                          "South West", Region)) %>%
+  mutate(Region=ifelse(省%in%c("陕西","甘肃","青海","宁夏","新疆"),
+                          "Northwest", Region)) %>%
+  mutate(Region=ifelse(省%in%c("北京","天津","河北","山西","内蒙古"),
+                          "North", Region)) %>%
+  mutate(Region=ifelse(省%in%c("辽宁","吉林","黑龙江"),
+                          "Northeast", Region)) %>%
+  left_join(., characteristics, by=c("省"="Place"))
+
+summary(announcements$Population)
+
+announcements<-announcements%>%
+  mutate(PopulationQuartile=ifelse(Population>=4126.00,
+                                   "Most Populous", 0)) %>%
+  mutate(PopulationQuartile=ifelse(Population>=3279.00 & Population<=4215.99,
+                         "More Populous", PopulationQuartile)) %>%
+  mutate(PopulationQuartile=ifelse(Population>=1963.00 & Population<=3278.99,
+                         "Less Populous", PopulationQuartile)) %>%
+  mutate(PopulationQuartile=ifelse(Population<=1962.99,"Least Populous", 
+                         PopulationQuartile))
+
+allchina <- ggplot(announcements, aes(x=date, 
+                                     fill=PopulationQuartile,
+                                     order=PopulationQuartile)) + 
+  geom_histogram() +
+  theme_bw() +
+  scale_fill_brewer(palette="Set1") +
+  ylab("Announcements") +
+  xlab("Date") +
+  ggtitle("National Announcements of Demolition Activity")
+
+ggsave("All China.pdf")
+
+```
+
+
